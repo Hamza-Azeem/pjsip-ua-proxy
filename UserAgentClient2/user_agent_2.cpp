@@ -10,27 +10,23 @@
 #include <cstdlib>
 #include <pjsua2.hpp>
 #include<iostream>
+
+#define THIS_FILE       "user_agent_2.cpp"
+
 using namespace std;
 
 using namespace pj;
 
-string myIp = "192.168.0.157:6000";
+static pjsip_endpoint* pj_endpt;
+
+static int code = PJSIP_SC_NOT_IMPLEMENTED;
+
+
+string myIp = "192.168.1.59:6000";
 string from = "sip:hamza@client.com";
 
-class ClientEndpoint : public Endpoint {
-public:
+#define HAS_UDP_TRANSPORT
 
-    ClientEndpoint() {
-    };
-
-    ~ClientEndpoint() {
-    };
-
-    PJ_DECL(pjsip_endpoint*) getPjsipEdnpoint() {
-        return pjsua_get_pjsip_endpt();
-    }
-
-};
 
 static pj_status_t make_call(string target, string to);
 
@@ -45,7 +41,7 @@ void sendRequest(pjsip_method_e methodId, string methodName, string target, stri
     string temp = "sip:" + myIp;
     pj_str_t contact_uri = pj_str((char*) temp.c_str());
     pj_status_t status = pjsip_endpt_create_request(
-            pjsua_get_pjsip_endpt(),
+            pj_endpt,
             &method,
             &target_uri,
             &from_uri,
@@ -60,7 +56,7 @@ void sendRequest(pjsip_method_e methodId, string methodName, string target, stri
         cout << "***********DAMN*********** Error: " << errmsg << endl;
     } else {
         cout << "***********HELL YEAH***********" << endl;
-        status = pjsip_endpt_send_request(pjsua_get_pjsip_endpt(), tdata, -1, NULL, NULL);
+        status = pjsip_endpt_send_request(pj_endpt, tdata, -1, NULL, NULL);
         if (status != PJ_SUCCESS) {
             cout << "Failed to send request!" << endl;
         }
@@ -76,7 +72,7 @@ pjsip_module client_module = {
     NULL, NULL, // prev, next (linked list)
     pj_str("uac-app-module"), // Name
     -1, // ID (will be set by registration)
-    PJSIP_MOD_PRIORITY_UA_PROXY_LAYER, // Priority
+    PJSIP_MOD_PRIORITY_APPLICATION, // Priority
     NULL, // load()
     NULL, // start()
     NULL, // stop()
@@ -88,74 +84,81 @@ pjsip_module client_module = {
     NULL, // on_tsx_state()
 };
 
-
-ClientEndpoint ep;
+void isStatusSuccessfull(pj_status_t status) {
+    if (status != PJ_SUCCESS) {
+        char errmsg[PJ_ERR_MSG_SIZE];
+        pj_strerror(status, errmsg, sizeof (errmsg));
+        PJ_LOG(1, (THIS_FILE, "Failed: %s", errmsg));
+    }
+}
 
 int main(int argc, char** argv) {
+    pj_caching_pool cach_pool;
+    pj_pool_t* pool = NULL;
+    pj_status_t status;
+    status = pj_init();
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
-    ep.libCreate();
+    status = pjlib_util_init();
 
-    EpConfig epConfig;
-    epConfig.logConfig.level = 4;
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
-    ep.libInit(epConfig);
+    pj_log_set_level(6);
 
-    TransportConfig tpConfig;
-    tpConfig.port = 6000;
-    ep.transportCreate(PJSIP_TRANSPORT_UDP, tpConfig);
-    //    pjsip_ua_init_module(ep.getPjsipEdnpoint(), NULL);
+    pj_caching_pool_init(&cach_pool, &pj_pool_factory_default_policy, 0);
 
-    pjsip_endpt_register_module(ep.getPjsipEdnpoint(), &client_module);
-
-    cout << "Module registered with ID: " << client_module.id << endl;
-    if (client_module.id < 0) {
-        cout << "ERROR: Module ID is still -1!" << endl;
-        return 1;
+    {
+        status = pjsip_endpt_create(&cach_pool.factory, "hamza--user-agent-client", &pj_endpt);
+        PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
     }
 
-    ep.libStart();
+    {
+        pj_sockaddr_in addr;
+        addr.sin_addr.s_addr = 0;
+        addr.sin_family = pj_AF_INET();
+        addr.sin_port = htons(6000);
 
-    if (pjsip_ua_instance() == NULL) {
-        // Not initialized, do it now
-        pjsip_ua_init_module(ep.getPjsipEdnpoint(), NULL);
-        cout << "UA module initialized" << endl;
-    } else {
-        cout << "UA module already initialized" << endl;
+        status = pjsip_udp_transport_start(pj_endpt, &addr, NULL, 1, NULL);
     }
 
 
-    AccountConfig accConfig;
-    accConfig.idUri = "sip:" + myIp;
+    status = pjsip_tsx_layer_init_module(pj_endpt);
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
-    Account* acc = new Account();
-    acc->create(accConfig);
+    status = pjsip_endpt_register_module(pj_endpt, &client_module);
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
-    char x;
-    while (cin >> x) {
-        if (x) {
-            make_call("sip:192.168.0.157:5000", "sip:hamza@linphone.com");
-        }
+    status = pjsip_ua_init_module(pj_endpt, NULL);
+
+    PJ_LOG(3, (THIS_FILE, "pjsip_ua is already initialized"));
+
+
+    string target = "sip:192.168.1.59:5000", to = "<sip:hamza@linphone.com>";
+    make_call(target, to);
+
+    for (;;) {
+        pjsip_endpt_handle_events(pj_endpt, NULL);
     }
-
-    ep.libDestroy();
 
     return 0;
 }
 
-void send_ack(pjsip_dialog* dlg, pjsip_rx_data *rdata) {
+void send_ack(pjsip_dialog* dlg, pjsip_rx_data * rdata) {
     pj_status_t status;
     pjsip_tx_data *tdata;
     status = pjsip_dlg_create_request(dlg, &pjsip_ack_method, rdata->msg_info.cseq->cseq, &tdata);
     if (status != PJ_SUCCESS) {
         cout << "Failed to create ACK request" << endl;
+        return;
     }
     status = pjsip_dlg_send_request(dlg, tdata, -1, NULL);
     if (status != PJ_SUCCESS) {
         cout << "Failed to send ACK request" << endl;
+        return;
     }
 }
 
-pj_bool_t on_rx_request(pjsip_rx_data *rdata) {
+pj_bool_t on_rx_request(pjsip_rx_data * rdata) {
 
     pj_status_t status;
     if (rdata->msg_info.msg->line.req.method.id == PJSIP_BYE_METHOD) {
@@ -164,7 +167,7 @@ pj_bool_t on_rx_request(pjsip_rx_data *rdata) {
         dlg = pjsip_rdata_get_dlg(rdata);
         if (dlg == NULL) {
 
-            status = pjsip_endpt_respond_stateless(pjsua_get_pjsip_endpt(), rdata, 481, NULL, NULL,
+            status = pjsip_endpt_respond_stateless(pj_endpt, rdata, 481, NULL, NULL,
                     NULL);
             return PJ_TRUE;
         }
@@ -190,7 +193,7 @@ pj_bool_t on_rx_request(pjsip_rx_data *rdata) {
     return PJ_FALSE;
 };
 
-pj_bool_t on_rx_response(pjsip_rx_data *rdata) {
+pj_bool_t on_rx_response(pjsip_rx_data * rdata) {
 
     pj_status_t status;
 
@@ -240,6 +243,8 @@ static pj_status_t make_call(string target, string to) {
             &to_uri, &target_uri, &dlg);
 
 
+    isStatusSuccessfull(status);
+
     if (status != PJ_SUCCESS) {
         cout << "FAILED TO CREATE UAC DIALOG" << endl;
         return status;
@@ -277,6 +282,12 @@ static pj_status_t make_call(string target, string to) {
             &tdata
             );
 
+    if (status != PJ_SUCCESS) {
+        PJ_LOG(3, (THIS_FILE, "REQUEST CREATION FAILED"));
+        return status;
+    }
+    PJ_LOG(3, (THIS_FILE, "CREATED REQUEST"));
+
     const char* sdp_text =
             "v=0\r\n"
             "o=user 123456 123456 IN IP4 192.168.0.157\r\n"
@@ -292,7 +303,13 @@ static pj_status_t make_call(string target, string to) {
     const pj_str_t subtype = pj_str("sdp");
 
     tdata->msg->body = pjsip_msg_body_create(tdata->pool, &type, &subtype, &sdp_body);
-    status = pjsip_dlg_send_request(dlg, tdata, -1, NULL);
+    try {
+        status = pjsip_dlg_send_request(dlg, tdata, -1, NULL);
+
+    } catch (Error &e) {
+        cout << e.reason << endl;
+        return status;
+    }
     pjsip_dlg_dec_lock(dlg);
     if (status != PJ_SUCCESS) {
         cout << "FAILED TO SEND REQUEST" << endl;
